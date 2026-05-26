@@ -45,13 +45,45 @@ The ATmega2560 has unique hardware peripheral configurations. Pins must be wired
 | **Tactile Button A** | Switch Terminal 1 | Pin 22 | INPUT_PULLUP | Reads LOW when pressed |
 | **Tactile Button B** | Switch Terminal 1 | Pin 23 | INPUT_PULLUP | Reads LOW when pressed |
 | **Tactile Button VIEW**| Switch Terminal 1 | Pin 24 | INPUT_PULLUP | Reads LOW when pressed |
-| **Tactile Button SET** | Switch Terminal 1 | Pin 25 | INPUT_PULLUP | Reads LOW when pressed |
+| **Tactile Button SETTINGS** | Switch Terminal 1 | Pin 25 | INPUT_PULLUP | Reads LOW when pressed |
 | **Thumb Joystick X** | VRx (Horizontal) | Pin A0 | Analog Input | Left/Right Position |
 | **Thumb Joystick Y** | VRy (Vertical)   | Pin A1 | Analog Input | Up/Down Position |
 
-*Note: All secondary terminals for the tactile buttons, as well as the GND pins of the joystick, sensor, RTC, TFT, and SD reader, must connect directly to the common ground rail.*
+*Note: GND pins of the joystick potentiometers, sensor, RTC, TFT, and SD reader must connect directly to the common ground rail. Tactile button wiring is covered in section 2.4 below.*
 
-### 2.4 TFT Display Library & Level Shifting
+### 2.4 Tactile Button & Potentiometer Wiring
+
+#### Tactile Buttons (Pins 22–25)
+
+Each button has two terminals. Wire one terminal to the Mega pin and the other terminal to GND. Nothing else — no resistors, no connection to 5V.
+
+```
+Mega Pin 22 ──── [terminal 1]
+                      │
+                 [ button ]
+                      │
+                 [terminal 2] ──── GND
+```
+
+The firmware configures each pin as `INPUT_PULLUP`. This activates an internal ~50kΩ resistor that holds the pin at 5V (HIGH) when the button is open. Pressing the button connects the pin directly to GND, pulling it LOW. The firmware treats LOW as "pressed". No external pull-up or pull-down resistor is needed.
+
+#### Joystick Potentiometers (Pins A0, A1)
+
+Each potentiometer axis has three terminals: two outer terminals and a middle wiper terminal. Wire them as a voltage divider:
+
+```
+5V  ──── [outer terminal A]
+               │
+          [wiper / middle] ──── A0 (X axis) or A1 (Y axis)
+               │
+GND ──── [outer terminal B]
+```
+
+With 5V across the pot, the wiper sweeps from near-0V to near-5V as the joystick moves, which the ADC reads as 0–1023. At rest/centre the reading will be approximately 512. The firmware treats readings below 200 as one extreme and above 823 as the other.
+
+**Direction note:** it does not matter which outer terminal goes to 5V vs GND, but the choice determines which physical direction reads high vs low. If the joystick direction appears inverted, swap the outer terminal connections (GND ↔ 5V) for that axis rather than changing the code.
+
+### 2.5 TFT Display Library & Level Shifting
 
 **Library: TFT_eSPI by Bodmer.** Do NOT use Adafruit_GFX or Adafruit_ST7735 — those libraries could not produce correct pixel output on this hardware. TFT_eSPI is configured entirely through its `User_Setup.h` file (in the Arduino libraries folder); no pin arguments are passed to the constructor.
 
