@@ -4,55 +4,62 @@
  * Each input is shown as a labelled box on the TFT; the box fills with
  * colour when active.
  *
+ * Uses InputManager (../../lib/InputManager.h) for debouncing and joystick
+ * normalisation — no raw pin logic here.
+ *
  * Buttons (INPUT_PULLUP, active LOW):
  *   A -> Pin 22   B -> Pin 23   VIEW -> Pin 24   SET -> Pin 25
  *
- * Joystick (analog, 0-1023):
+ * Joystick (analog, 0–1023):
  *   X axis -> A0   (< 200 = LEFT,  > 823 = RIGHT)
  *   Y axis -> A1   (< 200 = DOWN,  > 823 = UP)
- *   If directions are inverted for your joystick, swap the < / > signs below.
+ *   If directions are inverted for your joystick, swap the outer pot terminals
+ *   (GND ↔ 5V) for that axis — do not change the thresholds in InputManager.
  *
- * Wiring: same as Spectrometer — see CLAUDE.md.
+ * Wiring (Mega 2560, hardware SPI, 330/680Ω voltage dividers on signal lines):
+ *   TFT RST -> Pin 5    TFT CS  -> Pin 7    TFT DC  -> Pin 6
+ *   TFT BL  -> Pin 44 (via 68Ω resistor)    TFT DIN -> Pin 51   TFT CLK -> Pin 52
+ *   TFT VCC -> 3.3V     TFT GND -> GND
  *
- * Layout (160x128 landscape):
+ * TFT layout (160×128 landscape):
  *   y=0..15   header
  *   y=16..85  joystick D-pad cross
  *   y=86..127 four button boxes
+ *
+ * Serial output (115200 baud):
+ *   • "A pressed" / "A released"          — button state changes
+ *   • "Joy: UP" / "DOWN" / "LEFT" / "RIGHT" — rate-limited joystick ticks
+ *     (fires once on deflection, then repeats every 250 ms while held)
+ *
+ * Libraries: Adafruit GFX Library + Adafruit ST7735 and ST7789 Library
  */
 
-#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include "../../lib/InputManager.h"
 
-// --- Pins ---
-#define PIN_BTN_A     22
-#define PIN_BTN_B     23
-#define PIN_BTN_VIEW  24
-#define PIN_BTN_SET   25
-#define PIN_JOY_X     A0
-#define PIN_JOY_Y     A1
-
-// --- Joystick deflection thresholds ---
-#define JOY_LOW   200
-#define JOY_HIGH  823
-
-// --- Button debounce ---
-#define DEBOUNCE_MS  35
+#define TFT_CS   7  // was 10
+#define TFT_DC   6  // was 9  (Also RS)
+#define TFT_RST  5  // was 8
+#define TFT_BL   44  // backlight, via 68Ω resistor
 
 // --- Colors ---
-#define COL_JOY  TFT_CYAN
-#define COL_BTN  TFT_GREEN
+#define COL_JOY  ST77XX_CYAN
+#define COL_BTN  ST77XX_GREEN
 #define COL_DIM  0x4208   // dark grey outline when inactive
 #define COL_LBL  0x7BEF   // dim white label when inactive
 
-TFT_eSPI tft;
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+InputManager inputMgr;
 
-// -------------------------------------------------------
-// Box descriptor — position, size, label
-// -------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Box descriptor — screen position, size, label
+// ---------------------------------------------------------------------------
 struct Box { uint8_t x, y, w, h; const char* label; };
 
-// D-pad cross centred at (80, 50).
-// UP/DOWN arms are 26×14; LEFT/RIGHT arms are the same.
-// Gap between arm edge and centre: ~18px each side horizontally, 8px vertically.
+// D-pad cross centred at approximately (80, 50).
+// UP/DOWN arms: 26×14 px.  LEFT/RIGHT arms: same.
 static const Box JOY_BOXES[4] = {
     { 67, 23, 26, 14, "UP" },   // [0] UP
     { 67, 63, 26, 14, "DN" },   // [1] DOWN
@@ -60,7 +67,7 @@ static const Box JOY_BOXES[4] = {
     {114, 43, 26, 14, "RT" },   // [3] RIGHT
 };
 
-// Four button boxes spanning the bottom section, 40px slots each.
+// Four button boxes spanning the bottom section, ~40 px slots each.
 static const Box BTN_BOXES[4] = {
     {  3, 96, 34, 24, "A"    },
     { 43, 96, 34, 24, "B"    },
@@ -68,27 +75,24 @@ static const Box BTN_BOXES[4] = {
     {123, 96, 34, 24, "SET"  },
 };
 
-// -------------------------------------------------------
-// State
-// -------------------------------------------------------
-static bool stableBtn[4]        = {};
-static bool lastRawBtn[4]       = {};
-static unsigned long debounceStart[4] = {};
-static bool prevBtn[4]          = {};
-static bool prevJoy[4]          = {};
+// ---------------------------------------------------------------------------
+// Persistent display state (redraw only on change)
+// ---------------------------------------------------------------------------
+static bool prevJoy[4]  = {};  // last rendered joystick direction flags
+static bool prevHeld[4] = {};  // last rendered button hold states
 
-// -------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Draw one box.
-// active=true  → filled with activeColor, black label.
-// active=false → black fill, dim outline, dim label.
-// -------------------------------------------------------
+//   active = true  → filled with activeColor, black label
+//   active = false → black fill, dim outline, dim label
+// ---------------------------------------------------------------------------
 void drawBox(const Box& b, bool active, uint16_t activeColor) {
     tft.setTextSize(1);
     if (active) {
         tft.fillRect(b.x, b.y, b.w, b.h, activeColor);
-        tft.setTextColor(TFT_BLACK);
+        tft.setTextColor(ST77XX_BLACK);
     } else {
-        tft.fillRect(b.x, b.y, b.w, b.h, TFT_BLACK);
+        tft.fillRect(b.x, b.y, b.w, b.h, ST77XX_BLACK);
         tft.drawRect(b.x, b.y, b.w, b.h, COL_DIM);
         tft.setTextColor(COL_LBL);
     }
@@ -97,15 +101,15 @@ void drawBox(const Box& b, bool active, uint16_t activeColor) {
     tft.print(b.label);
 }
 
-// -------------------------------------------------------
-// Static chrome — drawn once at startup
-// -------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Static chrome — drawn once at startup, never re-cleared
+// ---------------------------------------------------------------------------
 void drawChrome() {
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(ST77XX_BLACK);
 
     // Header
     tft.setTextSize(1);
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ST77XX_WHITE);
     tft.setCursor(50, 4);
     tft.print(F("INPUT TEST"));
     tft.drawFastHLine(0, 15, 160, 0x2945);
@@ -129,67 +133,77 @@ void drawChrome() {
     }
 }
 
-// -------------------------------------------------------
+// ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
 
-    tft.init();
-    tft.setRotation(1);
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);  // backlight on
+
+    tft.initR(INITR_BLACKTAB);
+    tft.setRotation(1);  // landscape, USB connector on left
     drawChrome();
 
-    const uint8_t btnPins[4] = {PIN_BTN_A, PIN_BTN_B, PIN_BTN_VIEW, PIN_BTN_SET};
-    for (uint8_t i = 0; i < 4; i++) {
-        pinMode(btnPins[i], INPUT_PULLUP);
-    }
+    inputMgr.init();     // configures INPUT_PULLUP on all button pins
 
     Serial.println(F("Input test ready. Press buttons or move joystick."));
 }
 
-// -------------------------------------------------------
+// ---------------------------------------------------------------------------
 void loop() {
-    const uint8_t btnPins[4] = {PIN_BTN_A, PIN_BTN_B, PIN_BTN_VIEW, PIN_BTN_SET};
+    // Must be called first — latches fresh hardware state for this cycle.
+    inputMgr.update();
 
-    // --- Buttons: debounce, then redraw only on state change ---
+    // -----------------------------------------------------------------------
+    // Buttons
+    // isButtonHeld()  → current debounced state, used to drive the display.
+    // Tracking prevHeld[] means we only redraw and print on transitions,
+    // matching the original behaviour (no flood on hold).
+    // -----------------------------------------------------------------------
     for (uint8_t i = 0; i < 4; i++) {
-        bool raw = (digitalRead(btnPins[i]) == LOW);
+        bool held = inputMgr.isButtonHeld(static_cast<ButtonId>(i));
 
-        if (raw != lastRawBtn[i]) {
-            lastRawBtn[i]      = raw;
-            debounceStart[i]   = millis();
-        }
-        if ((millis() - debounceStart[i]) >= DEBOUNCE_MS) {
-            stableBtn[i] = raw;
-        }
-
-        if (stableBtn[i] != prevBtn[i]) {
-            prevBtn[i] = stableBtn[i];
-            drawBox(BTN_BOXES[i], stableBtn[i], COL_BTN);
+        if (held != prevHeld[i]) {
+            prevHeld[i] = held;
+            drawBox(BTN_BOXES[i], held, COL_BTN);
             Serial.print(BTN_BOXES[i].label);
-            Serial.println(stableBtn[i] ? F(" pressed") : F(" released"));
+            Serial.println(held ? F(" pressed") : F(" released"));
         }
     }
 
-    // --- Joystick: threshold comparison, redraw only on change ---
-    // Analog thresholds create a natural deadband — no debounce needed.
-    int xVal = analogRead(PIN_JOY_X);
-    int yVal = analogRead(PIN_JOY_Y);
-
+    // -----------------------------------------------------------------------
+    // Joystick display
+    // getRawJoystickDir() returns the instantaneous direction so the D-pad
+    // boxes stay lit continuously while the stick is deflected.
+    // -----------------------------------------------------------------------
+    JoystickDir rawDir = inputMgr.getRawJoystickDir();
     bool joyNow[4] = {
-        yVal > JOY_HIGH,   // [0] UP
-        yVal < JOY_LOW,    // [1] DOWN
-        xVal < JOY_LOW,    // [2] LEFT
-        xVal > JOY_HIGH,   // [3] RIGHT
+        rawDir == JoystickDir::UP,
+        rawDir == JoystickDir::DOWN,
+        rawDir == JoystickDir::LEFT,
+        rawDir == JoystickDir::RIGHT,
     };
-
     for (uint8_t i = 0; i < 4; i++) {
         if (joyNow[i] != prevJoy[i]) {
             prevJoy[i] = joyNow[i];
             drawBox(JOY_BOXES[i], joyNow[i], COL_JOY);
-            if (joyNow[i]) {
-                const char* names[4] = {"UP", "DOWN", "LEFT", "RIGHT"};
-                Serial.print(F("Joy: "));
-                Serial.println(names[i]);
-            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Joystick Serial ticks
+    // getJoystickDirection() emits once on deflection then auto-repeats every
+    // 250 ms — the same rate that UIManager will use for menu scrolling.
+    // -----------------------------------------------------------------------
+    JoystickDir tick = inputMgr.getJoystickDirection();
+    if (tick != JoystickDir::NONE) {
+        Serial.print(F("Joy: "));
+        switch (tick) {
+            case JoystickDir::UP:    Serial.println(F("UP"));    break;
+            case JoystickDir::DOWN:  Serial.println(F("DOWN"));  break;
+            case JoystickDir::LEFT:  Serial.println(F("LEFT"));  break;
+            case JoystickDir::RIGHT: Serial.println(F("RIGHT")); break;
+            default: break;
         }
     }
 }

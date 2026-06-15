@@ -27,6 +27,8 @@ The ATmega2560 has unique hardware peripheral configurations. Pins must be wired
 * **SDA:** Pin 20 (Shared between DS3231 RTC and AS7341 Spectral Sensor)
 * **SCL:** Pin 21 (Shared between DS3231 RTC and AS7341 Spectral Sensor)
 * **Power:** +5V Rail, Common GND Rail
+* **Level shifting:** None needed. I2C is open-drain — devices only pull lines LOW, and the HIGH level comes from each module's onboard pull-up resistors, which work fine at 5V.
+* **Address check:** DS3231 = `0x68`, AS7341 = `0x39` — no conflict.
 
 ### 2.2 Shared SPI Bus (Pins 50, 51, 52)
 * **MISO:** Pin 50 (Master In Slave Out - Connected to SD Card Slot out)
@@ -35,21 +37,28 @@ The ATmega2560 has unique hardware peripheral configurations. Pins must be wired
 
 ### 2.3 Individual Control/Select Pins
 
-| Component Module | Component Pin | Mega 2560 Pin | Config / Mode | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| **1.8" ST7735 TFT** | 1-RST | Pin 8 | Output | Hardware Reset Line |
-| **1.8" ST7735 TFT** | 2-CS | Pin 10 | Output | TFT Chip Select Line |
-| **1.8" ST7735 TFT** | 3-D/C | Pin 9 | Output | Data / Command Toggle Line |
-| **1.8" ST7735 TFT** | 7-BL | Pin 7 | Output (PWM) | Backlight Brightness Control |
-| **MicroSD Card Slot**| SD_CS | Pin 4 | Output | SD Card Chip Select Line |
-| **Tactile Button A** | Switch Terminal 1 | Pin 22 | INPUT_PULLUP | Reads LOW when pressed |
-| **Tactile Button B** | Switch Terminal 1 | Pin 23 | INPUT_PULLUP | Reads LOW when pressed |
-| **Tactile Button VIEW**| Switch Terminal 1 | Pin 24 | INPUT_PULLUP | Reads LOW when pressed |
-| **Tactile Button SETTINGS** | Switch Terminal 1 | Pin 25 | INPUT_PULLUP | Reads LOW when pressed |
-| **Thumb Joystick X** | VRx (Horizontal) | Pin A0 | Analog Input | Left/Right Position |
-| **Thumb Joystick Y** | VRy (Vertical)   | Pin A1 | Analog Input | Up/Down Position |
+The TFT/SD module has 15 pins. Pin numbers below refer to the physical module header (15-pin side). Signal lines driven by the 5V Mega require 330Ω/680Ω voltage dividers; lines that carry 3.3V signals from the module back to the Mega do not.
 
-*Note: GND pins of the joystick potentiometers, sensor, RTC, TFT, and SD reader must connect directly to the common ground rail. Tactile button wiring is covered in section 2.4 below.*
+| Component | Module Pin | Mega 2560 Pin | Divider? | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **1.8" ST7735 TFT** | Pin 3 — RST | D5 | Yes (330/680Ω) | Hardware Reset |
+| **1.8" ST7735 TFT** | Pin 4 — RS/DC | D6 | Yes (330/680Ω) | Data / Command Toggle |
+| **1.8" ST7735 TFT** | Pin 5 — SDA/MOSI | 51 (HW SPI) | Yes (330/680Ω) | Shared SPI data line |
+| **1.8" ST7735 TFT** | Pin 6 — SCK | 52 (HW SPI) | Yes (330/680Ω) | Shared SPI clock |
+| **1.8" ST7735 TFT** | Pin 7 — CS | D7 | Yes (330/680Ω) | TFT Chip Select |
+| **1.8" ST7735 TFT** | Pin 8 — BL | D44 (PWM) | No (current-limiting only, ~1.4mA via 68Ω) | Backlight power |
+| **MicroSD Card Slot** | Pin 11 — SD_CS | D4 | Yes (330/680Ω) | SD Chip Select |
+| **MicroSD Card Slot** | Pin 12 — SD_MOSI | 51 (shared) | Yes (330/680Ω) | Shared SPI data line |
+| **MicroSD Card Slot** | Pin 13 — SD_MISO | 50 (HW SPI) | **No** (3.3V out) | SD → Mega; no divider needed |
+| **MicroSD Card Slot** | Pin 14 — SD_CLK | 52 (shared) | Yes (330/680Ω) | Shared SPI clock |
+| **Tactile Button A** | Switch Terminal 1 | Pin 22 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Tactile Button B** | Switch Terminal 1 | Pin 23 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Tactile Button VIEW** | Switch Terminal 1 | Pin 24 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Tactile Button SETTINGS** | Switch Terminal 1 | Pin 25 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Thumb Joystick X** | VRx (Horizontal) | Pin A0 | No | Analog: Left/Right Position |
+| **Thumb Joystick Y** | VRy (Vertical) | Pin A1 | No | Analog: Up/Down Position |
+
+*Module power — Pin 1 → GND, Pin 2 → 3.3V (jumper J1 SHORT for 3.3V mode) or 5V (jumper J1 OPEN for 5V mode). GND pins of the joystick potentiometers, sensor, RTC, TFT, and SD reader must connect directly to the common ground rail. Tactile button wiring is covered in section 2.4 below.*
 
 ### 2.4 Tactile Button & Potentiometer Wiring
 
@@ -85,11 +94,64 @@ With 5V across the pot, the wiper sweeps from near-0V to near-5V as the joystick
 
 ### 2.5 TFT Display Library & Level Shifting
 
-**Library: TFT_eSPI by Bodmer.** Do NOT use Adafruit_GFX or Adafruit_ST7735 — those libraries could not produce correct pixel output on this hardware. TFT_eSPI is configured entirely through its `User_Setup.h` file (in the Arduino libraries folder); no pin arguments are passed to the constructor.
+**Library: Adafruit ST7735 and ST7789 Library + Adafruit GFX Library** (install both via Library Manager). The constructor takes the CS, DC, and RST pins directly — no external configuration file required:
 
-**Level shifting (5V Mega → 3.3V display).** The ST7735 TFT runs on 3.3V logic. Five signal lines require voltage dividers: CS (pin 10), RST (pin 8), DC (pin 9), MOSI (pin 51), and CLK (pin 52). Each divider uses a **330Ω resistor on top** (between the Mega output and the TFT pin) and a **680Ω resistor to GND** on the bottom. This produces approximately 3.37V at the TFT input and a source impedance of roughly 220Ω — low enough to avoid signal rounding at 8 MHz SPI.
+```cpp
+#define TFT_CS   7
+#define TFT_RST  5
+#define TFT_DC   6
+#define TFT_BL   44  // backlight, via 68Ω resistor
 
-> **Do not use high-value resistors** (e.g. 3kΩ/5.6kΩ). The resulting ~2kΩ Thevenin impedance forms an RC low-pass filter with wire capacitance that rounds SPI edges faster than the bit period, corrupting all pixel writes even though the slower init sequence appears to succeed (symptom: fillScreen has no effect).
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+```
+
+Initialise with `tft.initR(INITR_BLACKTAB)` then `tft.setRotation(1)` for landscape, after setting the backlight pin HIGH:
+
+```cpp
+pinMode(TFT_BL, OUTPUT);
+digitalWrite(TFT_BL, HIGH);  // backlight on
+```
+
+Colour constants use the `ST77XX_` prefix (e.g. `ST77XX_BLACK`, `ST77XX_WHITE`, `ST77XX_RED`). The backlight (module pin 8) is wired to Mega D44 through a 68Ω current-limiting resistor — D44 is PWM-capable for future dimming, but is simply driven HIGH for full brightness here.
+
+**Level shifting (5V Mega → 3.3V module).** Nine signal lines total need 330Ω/680Ω voltage dividers (see table in 2.3): TFT RST, DC, MOSI, SCK, CS, plus SD CS, SD MOSI, and SD CLK. SD MISO (pin 50) and BL do not need dividers — MISO is a 3.3V output from the card, and BL is a power line through a current-limiting resistor, not a logic signal.
+
+Each voltage divider per signal line:
+
+```
+Mega pin ──[ 330Ω ]──┬── Module pin
+                     │
+                   [680Ω]
+                     │
+                    GND
+Output = 5V × 680/(330+680) ≈ 3.37V  ✓
+```
+
+> **Do not use high-value resistors** (e.g. 3kΩ/5.6kΩ). The resulting ~2kΩ Thevenin impedance forms an RC low-pass filter with wire capacitance that rounds SPI edges faster than the bit period, corrupting all pixel writes even though the slower init sequence appears to succeed (symptom: `fillScreen` has no effect).
+
+### 2.6 RTC Library (DS3231)
+
+**Library: RTClib by Adafruit** (install via Library Manager; accept the Adafruit BusIO dependency prompt). This is the library `TimeManager` (section 3.1) wraps.
+
+```cpp
+#include <Wire.h>
+#include <RTClib.h>
+
+RTC_DS3231 rtc;
+```
+
+In `setup()`:
+```cpp
+Wire.begin();
+if (!rtc.begin()) {
+    // RTC not found — check wiring
+}
+if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));  // set to compile time
+}
+```
+
+`rtc.lostPower()` returns true only when the backup coin cell is dead or missing, so the time-set call won't run on every boot.
 
 ---
 

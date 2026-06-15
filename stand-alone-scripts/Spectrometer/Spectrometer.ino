@@ -4,9 +4,9 @@
  * Use this to validate hardware and assist with PAR calibration.
  *
  * Wiring:
- *   TFT RST  -> Pin 8    TFT CS  -> Pin 10   TFT D/C -> Pin 9
- *   TFT BL   -> Pin 7    TFT DIN -> Pin 51    TFT CLK -> Pin 52
- *   TFT VCC  -> 5V       TFT GND -> GND
+ *   TFT RST  -> Pin 5    TFT CS  -> Pin 7    TFT DC  -> Pin 6
+ *   TFT BL   -> Pin 44 (via 68Ω resistor)    TFT DIN -> Pin 51   TFT CLK -> Pin 52
+ *   TFT VCC  -> 3.3V     TFT GND -> GND
  *   AS7341 SDA -> Pin 20  AS7341 SCL -> Pin 21
  *   AS7341 VCC -> 5V      AS7341 GND -> GND
  *
@@ -22,13 +22,20 @@
  * Halogen vs warm LED split: ir_ratio = ch[7]/ch[6] > 0.75 → Halogen (smooth
  * blackbody); warm LED drops sharply at 680nm.
  * Fluorescent: includes ch[5] (590nm yellow phosphor) in detection fraction.
+ *
+ * Libraries: Adafruit GFX Library + Adafruit ST7735 and ST7789 Library + Adafruit AS7341
  */
 
 #include <Wire.h>
-#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 #include <Adafruit_AS7341.h>
 
-// Pins are defined in TFT_eSPI User_Setup.h — no pin definitions needed here.
+#define TFT_CS   7  // was 10
+#define TFT_DC   6  // was 9  (Also RS)
+#define TFT_RST  5  // was 8
+#define TFT_BL   44  // backlight, via 68Ω resistor
 
 // --- Screen dimensions (landscape) ---
 #define SCREEN_W  160
@@ -78,7 +85,7 @@ static const char* WL_LABELS[8] = {
     "415","445","480","515","555","590","630","680"
 };
 
-TFT_eSPI tft;
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 Adafruit_AS7341 sensor;
 
 static uint8_t prevBarH[8]    = {0};
@@ -195,7 +202,7 @@ void updateGainDisplay() {
     if (currentGain == prevDisplayGain) return;
     prevDisplayGain = currentGain;
 
-    tft.fillRect(GAIN_X, 0, SCREEN_W - GAIN_X, 15, TFT_BLACK);
+    tft.fillRect(GAIN_X, 0, SCREEN_W - GAIN_X, 15, ST77XX_BLACK);
     tft.setTextSize(1);
     tft.setTextColor(0x7BEF);
     tft.setCursor(GAIN_X, 2);
@@ -228,10 +235,10 @@ bool autoAdjustGain(const uint16_t* ch) {
 // Static chrome — drawn once on boot
 // -------------------------------------------------------
 void drawChrome() {
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(ST77XX_BLACK);
 
     tft.setTextSize(1);
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ST77XX_WHITE);
     tft.setCursor(2, 2);
     tft.print(F("SPECTRAL PROFILE"));
     // gain label drawn by updateGainDisplay() after sensor init
@@ -269,7 +276,7 @@ void updateBars(const uint16_t* ch) {
         if (newH > prevBarH[i]) {
             tft.fillRect(x, newTop, BAR_W, newH - prevBarH[i], BAR_COLORS[i]);
         } else {
-            tft.fillRect(x, oldTop, BAR_W, prevBarH[i] - newH, TFT_BLACK);
+            tft.fillRect(x, oldTop, BAR_W, prevBarH[i] - newH, ST77XX_BLACK);
         }
 
         prevBarH[i] = newH;
@@ -283,12 +290,12 @@ void updateLightType(LightType lt) {
     if ((uint8_t)lt == prevLightType) return;
     prevLightType = (uint8_t)lt;
 
-    tft.fillRect(0, TYPE_Y, SCREEN_W, SCREEN_H - TYPE_Y, TFT_BLACK);
+    tft.fillRect(0, TYPE_Y, SCREEN_W, SCREEN_H - TYPE_Y, ST77XX_BLACK);
     tft.setTextSize(1);
-    tft.setTextColor(TFT_YELLOW);
+    tft.setTextColor(ST77XX_YELLOW);
     tft.setCursor(2, TYPE_Y);
     tft.print(F("LIGHT: "));
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ST77XX_WHITE);
     tft.print(LIGHT_NAMES[lt]);
 }
 
@@ -296,14 +303,17 @@ void updateLightType(LightType lt) {
 void setup() {
     Serial.begin(115200);
 
-    tft.init();
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);  // backlight on
+
+    tft.initR(INITR_BLACKTAB);
     tft.setRotation(1);
     drawChrome();
 
     Wire.begin();
     if (!sensor.begin()) {
-        tft.fillScreen(TFT_BLACK);
-        tft.setTextColor(TFT_RED);
+        tft.fillScreen(ST77XX_BLACK);
+        tft.setTextColor(ST77XX_RED);
         tft.setTextSize(1);
         tft.setCursor(4, 50);
         tft.print(F("AS7341 NOT FOUND"));

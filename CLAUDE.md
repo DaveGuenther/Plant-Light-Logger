@@ -4,6 +4,7 @@
 
 - **Microcontroller:** Arduino Mega 2560
 - **Display:** 1.8" ST7735 TFT, 128×160, SPI (blue PCB, "1.8 TFT MODULE / 8 SPI 128X160")
+- **RTC:** DS3231 I2C real-time clock module
 
 ### Display Wiring (Mega 2560)
 
@@ -11,12 +12,12 @@
 |---------|----------|------|
 | VCC     | 5V       |      |
 | GND     | GND      |      |
-| CS      | 10       |      |
-| RST     | 8        |      |
-| DC/AO   | 9        |      |
+| CS      | 7        |      |
+| RST     | 5        |      |
+| DC/AO   | 6        |      |
 | DIN/MOSI| 51       | Hardware SPI |
 | CLK/SCK | 52       | Hardware SPI |
-| BL      | 7        | PWM backlight |
+| BL      | 44       | PWM-capable; via 68Ω resistor (~1.4mA) |
 
 ### Level Shifting (5V Mega → 3.3V display)
 
@@ -29,49 +30,68 @@ Use resistor voltage dividers on CS, RST, DC, MOSI, and CLK.
 
 ## Display Library
 
-**Use TFT_eSPI by Bodmer. Do NOT use Adafruit_GFX / Adafruit_ST7735.**
+**Use Adafruit ST7735 and ST7789 Library + Adafruit GFX Library** (install both via Library Manager).
 
-Adafruit_ST7735 was tested extensively and could not produce correct pixel output on this hardware regardless of init variant (GREENTAB, BLACKTAB, GREENTAB2, etc.) or SPI mode (software/hardware). Root cause was ultimately the resistor divider issue above, but TFT_eSPI was also adopted as it has better support for cheap ST7735 clones.
-
-### TFT_eSPI User_Setup.h Configuration
-
-The library's `User_Setup.h` (in the Arduino libraries folder) must be edited. Key settings:
+### Sketch Setup
 
 ```cpp
-// Section 1 — Driver
-#define ST7735_DRIVER        // enable this
-//#define ILI9341_DRIVER     // disable the default
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 
-// Display dimensions
-#define TFT_WIDTH  128
-#define TFT_HEIGHT 160
+#define TFT_CS   7
+#define TFT_RST  5
+#define TFT_DC   6
+#define TFT_BL   44  // backlight, via 68Ω resistor
 
-// ST7735 tab variant — BLACKTAB works for this module (correct 128x160 dimensions)
-// GREENTAB2 was also tried; both produce the same result for this module
-#define ST7735_BLACKTAB
-
-// Section 2 — Pins (Mega 2560 hardware SPI)
-//#define TFT_MISO  50  // not connected
-#define TFT_MOSI  51
-#define TFT_SCLK  52
-#define TFT_CS    10
-#define TFT_DC     9
-#define TFT_RST    8
-#define TFT_BL     7
-#define TFT_BACKLIGHT_ON HIGH
-
-// Section 4 — SPI speed
-#define SPI_FREQUENCY  8000000   // 8 MHz — safe with 330/680Ω dividers
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 ```
 
-### Known Display Quirk
+In `setup()`:
+```cpp
+pinMode(TFT_BL, OUTPUT);
+digitalWrite(TFT_BL, HIGH);  // backlight on
 
-A 1–2 pixel garbage strip appears at the top and left edges of the display regardless of tab variant or software settings. This is a physical characteristic of the LCD panel border (outside the controller's addressable RAM) and cannot be fixed in software. Keep all UI content at least 2 pixels away from the display edges.
+tft.initR(INITR_BLACKTAB);
+tft.setRotation(1);   // landscape
+```
+
+Colour constants use the `ST77XX_` prefix: `ST77XX_BLACK`, `ST77XX_WHITE`, `ST77XX_RED`, `ST77XX_GREEN`, `ST77XX_BLUE`, `ST77XX_YELLOW`, `ST77XX_CYAN`. Raw RGB565 hex values work directly with both `setTextColor()` and `fillRect()`.
 
 ---
 
-## Sketch Notes
+## RTC Wiring (DS3231)
 
-- Constructor: `TFT_eSPI tft = TFT_eSPI();` — no pin arguments needed, all pins come from User_Setup.h
-- Init: `tft.init()` then `tft.setRotation(1)` for landscape
-- Backlight is handled automatically by TFT_eSPI via TFT_BL/TFT_BACKLIGHT_ON defines
+| DS3231 Pin | Mega Pin | Note |
+|------------|----------|------|
+| VCC        | 5V       | Module is 5V tolerant |
+| GND        | GND      |      |
+| SDA        | 20       | Shared I2C bus (also used by AS7341) |
+| SCL        | 21       | Shared I2C bus (also used by AS7341) |
+
+No voltage dividers needed — I2C is open-drain, and the DS3231 module's onboard pull-ups work fine at 5V. No address conflict with the AS7341 (DS3231 = `0x68`, AS7341 = `0x39`).
+
+### Library
+
+**Use RTClib by Adafruit** (install via Library Manager; accept the Adafruit BusIO dependency prompt).
+
+```cpp
+#include <Wire.h>
+#include <RTClib.h>
+
+RTC_DS3231 rtc;
+```
+
+In `setup()`:
+```cpp
+Wire.begin();
+if (!rtc.begin()) {
+    // RTC not found — check wiring
+}
+if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));  // set to compile time
+}
+```
+
+`rtc.lostPower()` returns true only when the backup coin cell is dead or missing, so the time-set call won't run on every boot.
+
