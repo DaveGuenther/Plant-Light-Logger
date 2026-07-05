@@ -37,7 +37,7 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
-#include "../../lib/InputManager.h"
+#include "InputManager.h"
 
 #define TFT_CS   7  // was 10
 #define TFT_DC   6  // was 9  (Also RS)

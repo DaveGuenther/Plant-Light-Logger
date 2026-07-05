@@ -8,7 +8,7 @@
  * Hardware connections (ATmega2560):
  *   Button A        → Pin 22     Button B     → Pin 23
  *   Button VIEW     → Pin 24     Button SET   → Pin 25
- *   Joystick X-axis → A0         Joystick Y-axis → A1
+ *   Joystick X-axis → A1         Joystick Y-axis → A0
  *
  * Usage:
  *   1. #include "../../lib/InputManager.h"   (adjust relative path as needed)
@@ -85,8 +85,8 @@ public:
 private:
     // --- Configuration constants ---
     static const uint8_t        NUM_BTNS        = 4;
-    static const int            PIN_JOY_X       = A0;
-    static const int            PIN_JOY_Y       = A1;
+    static const int            PIN_JOY_X       = A1;  // physical left/right axis
+    static const int            PIN_JOY_Y       = A0;  // physical up/down axis
     static const int            THRESHOLD_LOW   = 200;   // joystick deflection deadband
     static const int            THRESHOLD_HIGH  = 823;
     static const unsigned long  DEBOUNCE_MS     = 35;    // button debounce window
@@ -161,10 +161,10 @@ inline void InputManager::update() {
 
     // Y-axis is checked first; diagonal positions default to vertical movement.
     JoystickDir dir = JoystickDir::NONE;
-    if      (yVal > THRESHOLD_HIGH) dir = JoystickDir::UP;
-    else if (yVal < THRESHOLD_LOW)  dir = JoystickDir::DOWN;
-    else if (xVal < THRESHOLD_LOW)  dir = JoystickDir::LEFT;
-    else if (xVal > THRESHOLD_HIGH) dir = JoystickDir::RIGHT;
+    if      (yVal < THRESHOLD_LOW)  dir = JoystickDir::UP;
+    else if (yVal > THRESHOLD_HIGH) dir = JoystickDir::DOWN;
+    else if (xVal > THRESHOLD_HIGH) dir = JoystickDir::LEFT;
+    else if (xVal < THRESHOLD_LOW)  dir = JoystickDir::RIGHT;
 
     _rawJoyDir = dir;
 
