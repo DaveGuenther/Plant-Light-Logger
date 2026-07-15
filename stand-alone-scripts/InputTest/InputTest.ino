@@ -8,7 +8,7 @@
  * normalisation — no raw pin logic here.
  *
  * Buttons (INPUT_PULLUP, active LOW):
- *   A -> Pin 22   B -> Pin 23   VIEW -> Pin 24   SET -> Pin 25
+ *   SELECT -> Pin 22   BACK -> Pin 23   VIEW -> Pin 24   SETTINGS -> Pin 25
  *
  * Joystick (analog, 0–1023):
  *   X axis -> A0   (< 200 = LEFT,  > 823 = RIGHT)
@@ -69,10 +69,10 @@ static const Box JOY_BOXES[4] = {
 
 // Four button boxes spanning the bottom section, ~40 px slots each.
 static const Box BTN_BOXES[4] = {
-    {  3, 96, 34, 24, "A"    },
-    { 43, 96, 34, 24, "B"    },
+    {  3, 96, 34, 24, "SEL"  },
+    { 43, 96, 34, 24, "BACK" },
     { 83, 96, 34, 24, "VIEW" },
-    {123, 96, 34, 24, "SET"  },
+    {123, 96, 34, 24, "STGS" },
 };
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
  * 2-axis analog joystick into discrete directional ticks for UI navigation.
  *
  * Hardware connections (ATmega2560):
- *   Button A        → Pin 22     Button B     → Pin 23
+ *   Button SELECT   → Pin 22     Button BACK  → Pin 23
  *   Button VIEW     → Pin 24     Button SET   → Pin 25
  *   Joystick X-axis → A1         Joystick Y-axis → A0
  *
@@ -15,7 +15,7 @@
  *   2. Declare:  InputManager inputMgr;
  *   3. setup():  inputMgr.init();
  *   4. loop():   inputMgr.update();   // must be first call every loop
- *                inputMgr.isButtonPressed(ButtonId::A);      // fire-once tap event
+ *                inputMgr.isButtonPressed(ButtonId::SELECT);  // fire-once tap event
  *                inputMgr.isButtonHeld(ButtonId::VIEW);      // continuous hold state
  *                inputMgr.getJoystickDirection();            // rate-limited tick
  *                inputMgr.getRawJoystickDir();               // instantaneous direction
@@ -47,8 +47,8 @@ void setup() {
 void loop() {
     inputMgr.update();
 
-    if (inputMgr.isButtonPressed(ButtonId::A))
-        Serial.println(F("A tapped"));
+    if (inputMgr.isButtonPressed(ButtonId::SELECT))
+        Serial.println(F("SELECT tapped"));
 
     JoystickDir dir = inputMgr.getJoystickDirection();
     if (dir == JoystickDir::LEFT)
@@ -64,7 +64,7 @@ void loop() {
 // Public enumerations
 // ---------------------------------------------------------------------------
 
-enum class ButtonId    : uint8_t { A = 0, B = 1, VIEW = 2, SETTINGS = 3 };
+enum class ButtonId    : uint8_t { SELECT = 0, BACK = 1, VIEW = 2, SETTINGS = 3 };
 enum class JoystickDir : uint8_t { NONE = 0, UP, DOWN, LEFT, RIGHT };
 
 // ---------------------------------------------------------------------------

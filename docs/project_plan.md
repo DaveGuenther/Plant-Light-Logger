@@ -51,8 +51,8 @@ The TFT/SD module has 15 pins. Pin numbers below refer to the physical module he
 | **MicroSD Card Slot** | Pin 12 — SD_MOSI | 51 (shared) | Yes (330/680Ω) | Shared SPI data line |
 | **MicroSD Card Slot** | Pin 13 — SD_MISO | 50 (HW SPI) | **No** (3.3V out) | SD → Mega; no divider needed |
 | **MicroSD Card Slot** | Pin 14 — SD_CLK | 52 (shared) | Yes (330/680Ω) | Shared SPI clock |
-| **Tactile Button A** | Switch Terminal 1 | Pin 22 | No (INPUT_PULLUP) | Reads LOW when pressed |
-| **Tactile Button B** | Switch Terminal 1 | Pin 23 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Tactile Button SELECT** | Switch Terminal 1 | Pin 22 | No (INPUT_PULLUP) | Reads LOW when pressed |
+| **Tactile Button BACK** | Switch Terminal 1 | Pin 23 | No (INPUT_PULLUP) | Reads LOW when pressed |
 | **Tactile Button VIEW** | Switch Terminal 1 | Pin 24 | No (INPUT_PULLUP) | Reads LOW when pressed |
 | **Tactile Button SETTINGS** | Switch Terminal 1 | Pin 25 | No (INPUT_PULLUP) | Reads LOW when pressed |
 | **Thumb Joystick X** | VRx (Horizontal) | Pin A0 | No | Analog: Left/Right Position |
@@ -164,7 +164,7 @@ To maximize architectural maintainability, all domain spaces are modeled inside 
 #### InputManager
 Enforces button debouncing using non-blocking software timers and converts analog joystick sweeps into precise discrete movements using strict window thresholds.
 ```cpp
-enum class ButtonId { A, B, VIEW, SETTINGS };
+enum class ButtonId { SELECT, BACK, VIEW, SETTINGS };
 enum class JoystickDir { NONE, UP, DOWN, LEFT, RIGHT };
 
 class InputManager {
@@ -304,14 +304,14 @@ The execution of screens matches your architectural menu requirements exactly. U
 |  LIGHT_SIGNATURE  |   |   SETTINGS_MENU   |                |
 +-------------------+   +-------------------+                |
 |                           |                                |
-| [B/VIEW Pressed]          | [Joystick Ticks]               |
+| [BACK/VIEW Pressed]       | [Joystick Ticks]               |
 +---------------------------+--> (Select "Manage Locations") |
 v                                    |
 +-------------------+                |
 | MANAGE_LOCATIONS  |                |
 +-------------------+                |
 |                                    |
-| [A Pressed on "Add New"]           | [B Pressed]
+| [SELECT Pressed on "Add New"]      | [BACK Pressed]
 v                                    |
 +-------------------+                |
 |   DATA_ENTRY_KB   | ---------------+
@@ -320,10 +320,10 @@ v                                    |
 
 ### 4.1 State Definitions
 1. **`MAIN_DISPLAY`:** Default execution environment. Displays current Location Name, Live PPFD/PAR value, running integrated DLI calculation, Clock, and Battery Status. Pressing **VIEW** moves to `LIGHT_SIGNATURE`. Pressing **SETTINGS** moves to `SETTINGS_MENU`.
-2. **`LIGHT_SIGNATURE`:** Renders an 8-channel live dynamic bar graph mapping wavelengths (F1-F8). Auto-scales the height relative to the single highest-amplitude channel. Pressing **B** or **VIEW** returns processing straight to `MAIN_DISPLAY`.
-3. **`SETTINGS_MENU`:** Linear vertical menu. Use Joystick `UP`/`DOWN` to step through parameters (Set Clock, Logging Interval, Manage Locations). **Button A** confirms choice; **Button B** cancels back to `MAIN_DISPLAY`.
+2. **`LIGHT_SIGNATURE`:** Renders an 8-channel live dynamic bar graph mapping wavelengths (F1-F8). Auto-scales the height relative to the single highest-amplitude channel. Pressing **BACK** or **VIEW** returns processing straight to `MAIN_DISPLAY`.
+3. **`SETTINGS_MENU`:** Linear vertical menu. Use Joystick `UP`/`DOWN` to step through parameters (Set Clock, Logging Interval, Manage Locations). **SELECT** confirms choice; **BACK** cancels back to `MAIN_DISPLAY`.
 4. **`MANAGE_LOCATIONS`:** Reads listing profiles. Displays existing tags or an option to "Add New". Clicking "Add New" shifts control straight to the active keyboard text screen.
-5. **`DATA_ENTRY_KB`:** Generates a character layout grid. Joystick inputs navigate the grid coordinates. Clicking **Button A** appends the character. Clicking **Button B** completes string saving or exits.
+5. **`DATA_ENTRY_KB`:** Generates a character layout grid. Joystick inputs navigate the grid coordinates. Clicking **SELECT** appends the character. Clicking **BACK** completes string saving or exits.
 
 ---
 
@@ -398,7 +398,7 @@ void setup() {
         Serial.println(F("[BENCH] Input Testing Active."));
         while(1) {
             inputMgr.update();
-            if(inputMgr.isButtonPressed(ButtonId::A)) Serial.println(F("Button A Clicked"));
+            if(inputMgr.isButtonPressed(ButtonId::SELECT)) Serial.println(F("SELECT Pressed"));
             if(inputMgr.getJoystickDirection() == JoystickDir::UP) Serial.println(F("Joystick UP"));
             delay(10);
         }

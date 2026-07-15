@@ -28,6 +28,7 @@
 
 #include <Wire.h>
 #include <SPI.h>
+#include <SdFat.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <Adafruit_AS7341.h>
@@ -36,6 +37,7 @@
 #define TFT_DC   6  // was 9  (Also RS)
 #define TFT_RST  5  // was 8
 #define TFT_BL   44  // backlight, via 68Ω resistor
+#define SD_CS     4
 
 // --- Screen dimensions (landscape) ---
 #define SCREEN_W  160
@@ -47,22 +49,26 @@
 //       │  SPECTRAL PROFILE                  G:256x  │  16px header
 //  y=16 ├────────────────────────────────────────────┤
 //       │                                            │
-//       │   [■] [■] [■] [■] [■] [■] [■] [■]         │  78px chart
+//       │   [■] [■] [■] [■] [■] [■] [■] [■]         │  60px chart
 //       │                                            │
-//  y=95 ├────────────────────────────────────────────┤
-//       │  415  445  480  515  555  590  630  680     │  12px wavelength labels
-// y=108 ├────────────────────────────────────────────┤
-//       │  LIGHT: Warm LED                           │  20px light type
+//  y=77 ├────────────────────────────────────────────┤
+//       │  415  445  480  515  555  590  630  680     │  wavelength labels
+//  y=89 ├────────────────────────────────────────────┤
+//  y=91 │  LIGHT: Warm LED                           │
+// y=101 │  PAR: 45.2 umol/m2/s                      │  (when calibrated)
+// y=112 │  DLI@12h: 1.95 mol/m2                     │  (when calibrated)
 // y=128 └────────────────────────────────────────────┘
 
 #define GAIN_X     114   // x-start of gain label in header
 
 #define CHART_TOP  17
-#define CHART_H    78
-#define CHART_BOT  (CHART_TOP + CHART_H)   // y=95
+#define CHART_H    60
+#define CHART_BOT  (CHART_TOP + CHART_H)   // y=77
 
-#define LABEL_Y   97
-#define TYPE_Y   110
+#define LABEL_Y   79
+#define TYPE_Y    91
+#define PAR_Y    101   // PAR row (only shown when CAL.CFG loaded)
+#define DLI_Y    112   // DLI@12h row (only shown when CAL.CFG loaded)
 
 // 8 bars across 160px: 20px slot, 14px bar, 3px gap each side
 #define BAR_SLOT  20
@@ -87,16 +93,29 @@ static const char* WL_LABELS[8] = {
 
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 Adafruit_AS7341 sensor;
+SdFat32         sd;
 
 static uint8_t prevBarH[8]    = {0};
 static uint8_t prevLightType  = 255;
 static as7341_gain_t currentGain     = AS7341_GAIN_256X;
 static as7341_gain_t prevDisplayGain = (as7341_gain_t)255;  // sentinel forces first draw
 
+// PAR calibration — loaded from CAL.CFG on SD card at startup
+static float K_sensor = 0.f;
+static bool  hasCal   = false;
+
 // Gain multiplier strings for Serial CSV output (index matches as7341_gain_t enum)
 static const char* GAIN_STRINGS[] = {
     "0.5","1","2","4","8","16","32","64","128","256","512"
 };
+
+// Gain multiplier values for PAR normalisation (index matches as7341_gain_t enum)
+static const float GAIN_VALUES[11] = {
+    0.5f, 1.f, 2.f, 4.f, 8.f, 16.f, 32.f, 64.f, 128.f, 256.f, 512.f
+};
+
+// AS7341 channel bandwidths in nm FWHM — weights each channel's photon-flux contribution
+static const float CH_BW[8] = {26.f, 30.f, 36.f, 39.f, 39.f, 40.f, 50.f, 52.f};
 
 // -------------------------------------------------------
 // Light type classification
@@ -290,7 +309,8 @@ void updateLightType(LightType lt) {
     if ((uint8_t)lt == prevLightType) return;
     prevLightType = (uint8_t)lt;
 
-    tft.fillRect(0, TYPE_Y, SCREEN_W, SCREEN_H - TYPE_Y, ST77XX_BLACK);
+    // Only clear the light-type row, not into the PAR row below it
+    tft.fillRect(0, TYPE_Y, SCREEN_W, PAR_Y - TYPE_Y, ST77XX_BLACK);
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_YELLOW);
     tft.setCursor(2, TYPE_Y);
@@ -300,8 +320,92 @@ void updateLightType(LightType lt) {
 }
 
 // -------------------------------------------------------
+// PAR row — redrawn only when value changes by ≥0.05 µmol/m²/s
+// -------------------------------------------------------
+void updatePAR(float par) {
+    static float prevPAR = -1.f;
+    if (fabs(par - prevPAR) < 0.05f) return;
+    prevPAR = par;
+
+    tft.fillRect(0, PAR_Y, SCREEN_W, DLI_Y - PAR_Y, ST77XX_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_GREEN);
+    tft.setCursor(2, PAR_Y);
+    tft.print(F("PAR: "));
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(par, 1);
+    tft.print(F(" umol/m2/s"));
+}
+
+// -------------------------------------------------------
+// DLI@12h row — estimated daily light integral assuming 12 h at current PAR.
+// DLI (mol/m²/day) = PAR (µmol/m²/s) × 3600 × 12 × 10⁻⁶ = PAR × 0.0432
+// -------------------------------------------------------
+void updateDLI(float par) {
+    float dli = par * 0.0432f;
+    static float prevDLI = -1.f;
+    if (fabs(dli - prevDLI) < 0.002f) return;
+    prevDLI = dli;
+
+    tft.fillRect(0, DLI_Y, SCREEN_W, SCREEN_H - DLI_Y, ST77XX_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setCursor(2, DLI_Y);
+    tft.print(F("DLI@12h: "));
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(dli, 2);
+    tft.print(F(" mol/m2"));
+}
+
+// -------------------------------------------------------
+// Load K_SENSOR from CAL.CFG on the SD card.
+// sd.begin() must already have succeeded before calling this.
+// -------------------------------------------------------
+bool loadCalibration() {
+    File32 f = sd.open("CAL.CFG", O_READ);
+    if (!f) return false;
+
+    char line[40];
+    uint8_t pos = 0;
+
+    while (f.available()) {
+        char c = (char)f.read();
+        if (c == '\n' || c == '\r') {
+            if (pos > 0) {
+                line[pos] = '\0';
+                if (strncmp(line, "K_SENSOR=", 9) == 0) {
+                    K_sensor = atof(line + 9);
+                    f.close();
+                    return K_sensor > 0.f;
+                }
+                pos = 0;
+            }
+        } else if (pos < (uint8_t)(sizeof(line) - 1)) {
+            line[pos++] = c;
+        }
+    }
+    // Flush final line if no trailing newline
+    if (pos > 0) {
+        line[pos] = '\0';
+        if (strncmp(line, "K_SENSOR=", 9) == 0) {
+            K_sensor = atof(line + 9);
+            f.close();
+            return K_sensor > 0.f;
+        }
+    }
+    f.close();
+    return false;
+}
+
+// -------------------------------------------------------
 void setup() {
     Serial.begin(115200);
+
+    // Deassert SD CS before TFT SPI starts — SD card CS must be HIGH
+    // while TFT is being initialized on the shared SPI bus, otherwise
+    // TFT init traffic is seen by the SD card as valid SPI commands.
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
 
     pinMode(TFT_BL, OUTPUT);
     digitalWrite(TFT_BL, HIGH);  // backlight on
@@ -323,15 +427,40 @@ void setup() {
         while (1);
     }
 
-    // ATIME=99, ASTEP=999 -> ~278ms integration per read
-    // Gain starts at 256x and is adjusted automatically each cycle
     sensor.setATIME(99);
     sensor.setASTEP(999);
     sensor.setGain(currentGain);
-    updateGainDisplay();  // show initial gain immediately
+    updateGainDisplay();
 
-    Serial.println(F("Ready. Serial output is CSV:"));
-    Serial.println(F("F1(415),F2(445),F3(480),F4(515),F5(555),F6(590),F7(630),F8(680),gain_x"));
+    // SHARED_SPI uses SPI transactions — required to coexist with Adafruit libraries
+    bool sdOk = sd.begin(SdSpiConfig(SD_CS, SHARED_SPI, SD_SCK_MHZ(4)));
+    if (!sdOk) {
+        Serial.println(F("SD init FAILED — error detail:"));
+        sd.initErrorPrint(&Serial);
+    } else {
+        hasCal = loadCalibration();
+    }
+    if (hasCal) {
+        Serial.print(F("CAL.CFG loaded: K_sensor="));
+        Serial.println(K_sensor, 8);
+        Serial.println(F("F1(415),F2(445),F3(480),F4(515),F5(555),F6(590),F7(630),F8(680),gain_x,PAR_umol"));
+    } else {
+        tft.setTextSize(1);
+        tft.setCursor(2, PAR_Y);
+        if (!sdOk) {
+            Serial.println(F("SD init FAILED"));
+            tft.setTextColor(ST77XX_RED);
+            tft.print(F("SD FAILED"));
+        } else {
+            Serial.println(F("No CAL.CFG — run Calibration.ino first."));
+            tft.setTextColor(ST77XX_YELLOW);
+            tft.print(F("No CAL.CFG"));
+        }
+        tft.setTextColor(0x7BEF);
+        tft.setCursor(2, DLI_Y);
+        tft.print(F("Run Calibration.ino"));
+        Serial.println(F("F1(415),F2(445),F3(480),F4(515),F5(555),F6(590),F7(630),F8(680),gain_x"));
+    }
 }
 
 // -------------------------------------------------------
@@ -362,14 +491,34 @@ void loop() {
         if (!autoAdjustGain(ch)) break;
     }
 
-    // CSV to Serial — 8 channels + gain multiplier
+    // Compute PAR if calibration was loaded
+    float par = 0.f;
+    if (hasCal) {
+        float gainFactor = GAIN_VALUES[(int)currentGain];
+        float normSum = 0.f;
+        for (uint8_t i = 0; i < 8; i++) {
+            normSum += (float)ch[i] / gainFactor * CH_BW[i];
+        }
+        par = K_sensor * normSum;
+    }
+
+    // CSV to Serial — 8 channels + gain multiplier [+ PAR if calibrated]
     for (uint8_t i = 0; i < 8; i++) {
         Serial.print(ch[i]);
         Serial.print(F(","));
     }
-    Serial.println(GAIN_STRINGS[(int)currentGain]);
+    Serial.print(GAIN_STRINGS[(int)currentGain]);
+    if (hasCal) {
+        Serial.print(F(","));
+        Serial.print(par, 2);
+    }
+    Serial.println();
 
     updateGainDisplay();
     updateBars(ch);
     updateLightType(classifyLight(ch));
+    if (hasCal) {
+        updatePAR(par);
+        updateDLI(par);
+    }
 }

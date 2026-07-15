@@ -39,7 +39,7 @@
  */
 
 #include <SPI.h>
-#include <SD.h>
+#include <SdFat.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
@@ -52,6 +52,7 @@
 #define FILENAME   "LOG.CSV"
 
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+SdFat32         sd;
 
 // Sample data — five rows that look like real logger output
 struct Row { uint32_t ms; float par; float dli; };
@@ -92,7 +93,7 @@ void setup() {
     // ---- Init SD --------------------------------------------------------
     showStatus(F("Init SD..."));
 
-    if (!SD.begin(SD_CS_PIN)) {
+    if (!sd.begin(SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(4)))) {
         showStatus(F("SD init FAILED"), ST77XX_RED);
         Serial.println(F("SD init failed. Check wiring."));
         return;
@@ -103,8 +104,8 @@ void setup() {
     // ---- Write ----------------------------------------------------------
     showStatus(F("Writing " FILENAME "..."));
 
-    SD.remove(FILENAME);   // always start with a fresh file
-    File f = SD.open(FILENAME, FILE_WRITE);
+    sd.remove(FILENAME);   // always start with a fresh file
+    File32 f = sd.open(FILENAME, O_WRITE | O_CREAT | O_TRUNC);
     if (!f) {
         showStatus(F("Write open FAILED"), ST77XX_RED);
         return;
@@ -119,7 +120,7 @@ void setup() {
     f.close();
 
     // ---- Read back and display on TFT ----------------------------------
-    f = SD.open(FILENAME);
+    f = sd.open(FILENAME, O_READ);
     if (!f) {
         showStatus(F("Read open FAILED"), ST77XX_RED);
         return;
