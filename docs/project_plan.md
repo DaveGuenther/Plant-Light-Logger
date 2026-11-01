@@ -191,64 +191,100 @@ public:
 ```
 
 #### TimeManager
-Wraps the Adafruit `RTClib` and handles non-blocking temporal comparisons to emit events when a standard hour or calendar day has crossed structural thresholds.
+**Implemented:** [`lib/TimeManager.h`](../lib/TimeManager.h) (header-only; tested with `stand-alone-scripts/TimeManagerTest`).
+
+Wraps the Adafruit `RTClib` and latches hour / calendar-day rollover events.
 ```cpp
 #include <RTClib.h>
 
 class TimeManager {
-private:
-    RTC_DS3231 rtc;
-    DateTime lastCheckedTime;
-
 public:
-    bool init();
+    bool init();              // false if the DS3231 is not found
     DateTime getCurrentTime();
     void setCurrentTime(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t min, uint8_t sec);
-    bool hasHourRolledOver();
-    bool hasDayRolledOver();
+    bool hasHourRolledOver(); // true ONCE per rollover (cleared on read)
+    bool hasDayRolledOver();  // independent of the hour flag; both fire at midnight
+    bool wasClockReset() const; // RTC lost power at init and was set to compile time
 };
 ```
+Design notes:
+* Rollovers are detected by comparing `unixtime() / 3600` and `unixtime() / 86400` against the last seen value. Hour and day are tracked separately, so reading one flag never consumes the other (a single `lastCheckedTime` would).
+* Events are latched, so a rollover is not lost if it is checked late.
+* The RTC is read over I2C at most every 250 ms, however often the checks are called.
+* `setCurrentTime()` re-baselines the tracking, so changing the clock never produces a false event.
+* `wasClockReset()` lets the UI prompt the user to set the clock after a dead or missing backup cell.
 
 #### DataManager
-Interfaces with the `Adafruit_AS7341` library, applies calibrated algorithms to approximate PAR, integrates historical arrays, and logs entries to the SD Card reader.
+**Implemented:** [`lib/DataManager.h`](../lib/DataManager.h) (header-only; tested with `stand-alone-scripts/DataManagerTest`, including a 1 Hz sensor-plus-SD soak test with zero read or write failures).
+
+Owns the `Adafruit_AS7341` sensor and the SD card (via **SdFat**, not `SD.h` — `SD.h` conflicts with the AS7341). Reads the 8 channels with auto-gain, classifies the light, converts to PAR using `K_SENSOR` from `CAL.CFG`, integrates DLI, and appends CSV records.
 ```cpp
 #include <Adafruit_AS7341.h>
-#include <SD.h>
-
-struct SpectralSnapshot {
-    uint16_t channels[8]; // F1-F8 values
-    float par;
-    uint32_t timestamp;
-};
+#include <SdFat.h>
 
 class DataManager {
-private:
-    Adafruit_AS7341 sensor;
-    const int chipSelectSD = 4;
-    
-    float currentPAR = 0.0f;
-    float cumulativeDLI = 0.0f;
-    unsigned long readingCount = 0;
-    
-    uint16_t currentRawSpectrum[8];
-    float hourlyPARHistory[24];
-    uint8_t historyIndex = 0;
-
 public:
     bool initSensor();
-    bool initSD();
-    
-    void captureInstantaneousSpectrum();
-    void processDLIIntegration(float readingDurationSeconds);
-    void rolloverDailyLog(const char* locationName, DateTime date);
-    bool commitHourlyRecordToSD(const char* locationName, DateTime dt);
-    
-    const uint16_t* getRawSpectrum() const { return currentRawSpectrum; }
-    float getCurrentPAR() const { return currentPAR; }
-    float getCalculatedDLI() const { return cumulativeDLI; }
+    bool initSD();                       // SHARED_SPI, 4 MHz; also loads K_SENSOR from CAL.CFG
+    bool sdAvailable() const;
+    bool hasCalibration() const;         // false -> PAR reads 0
+    float getKSensor() const;
+
+    bool captureInstantaneousSpectrum(); // blocks ~278 ms (up to 4x with auto-gain); false on read failure
+    void processDLIIntegration(float readingDurationSeconds);  // feeds running DLI AND hour stats
+    bool commitHourlyRecordToSD(const char* locationName, const DateTime& dt);
+    bool rolloverDailyLog(const char* locationName, const DateTime& day);  // `day` = date being CLOSED
     void resetDLICounter();
+
+    const uint16_t* getRawSpectrum() const;
+    float getCurrentPAR() const;
+    float getCalculatedDLI() const;      // mol m-2 since last reset
+    LightType getLightType() const;      // + getLightName()
+    float getGainFactor() const;         // gain the stored spectrum was read at
+    bool isSaturated() const;            // peak >= 65000 counts
+    uint32_t getReadFailures() const;
+    uint32_t getWriteFailures() const;
 };
 ```
+Design notes:
+* **PAR gain:** PAR is normalised by the gain each read was *actually taken at*. The standalone sketches use the gain after the auto-gain step, which is wrong on the rare cycle where the fourth read still needed a change.
+* **Failure handling:** a failed capture leaves the previous values in place and `processDLIIntegration()` then skips, so a dropout under-counts rather than re-counting stale light. Hour statistics reset after `commitHourlyRecordToSD()` even if the write fails, so one bad write never pollutes the next hour.
+* **Daily rollover:** `rolloverDailyLog()` does not reset counters; the caller then calls `resetDLICounter()`. When triggered by a midnight rollover, pass `now - TimeSpan(1,0,0,0)` as `day`.
+* **Output files** (created on first write, with a header row; one file for all locations keeps names 8.3-safe):
+  * `HOURLY.CSV` — `hour_end,location,par_avg,par_max,dli_so_far,samples,light_type`
+  * `DAILY.CSV` — `date,location,dli_mol_m2,par_peak,samples`
+* **Pin setup:** drive `SD_CS` (4) and `TFT_CS` (7) HIGH before any SPI traffic, then `Wire.begin()`, then `initSensor()` / `initSD()`.
+* **Low-signal rule:** at very low signal the classifier is unreliable (a covered sensor reads as "Halogen" because red and near-IR leak through the cover). When the gain-normalised peak (counts / gain) is below 1.5 — about 770 counts at 512x — `isDark()` is true, the light type is "Unknown" and PAR is 0. PAR below 0.5 µmol/m²/s is also floored to 0 (12 h at 0.5 is only 0.02 mol/m² of DLI). Thresholds come from covered-sensor readings (peaks of ~170 to ~480 at 512x, depending on how much light leaks through the cover) versus dim indoor light (peak ~1700 at 512x, PAR 1.4).
+
+#### SettingsManager
+**Implemented, awaiting hardware test:** [`lib/SettingsManager.h`](../lib/SettingsManager.h) (test sketch: `stand-alone-scripts/SettingsManagerTest`).
+
+Persists user settings on the SD card so the logger can be lent out and moved between places. Location names are written into every `HOURLY.CSV` / `DAILY.CSV` row, so one pair of files covers every location.
+```cpp
+enum class LocResult { OK, INVALID_NAME, DUPLICATE, FULL, LAST_LOCATION, BAD_INDEX };
+
+class SettingsManager {
+public:
+    bool begin(SdFat32* fs);                 // nullptr ok; falls back to "DEFAULT_LOC", 60 min
+    uint8_t getLocationCount() const;        // up to 10 locations
+    const char* getLocation(uint8_t i) const;
+    const char* getActiveLocation() const;   uint8_t getActiveIndex() const;
+    LocResult addLocation(const char* name);       // 1-15 chars: letters, digits, space _ - .
+    LocResult removeLocation(uint8_t i);           // list only; logged data is never touched
+    LocResult setActiveLocation(uint8_t i);
+    uint16_t getLogIntervalMin() const;      bool setLogIntervalMin(uint16_t m);  // 5/10/15/30/60
+    bool saveState(const DliState& s, const char* location);   // running-DLI snapshot
+    bool loadState(DliState& s, char* locationOut);
+    void clearState();
+};
+```
+Files (8.3 names, `KEY=value` like `CAL.CFG`): `SETTINGS.CFG` (`ACTIVE_LOCATION`, `LOG_INTERVAL_MIN`), `LOCS.CFG` (one name per line), `STATE.CFG` (the `DliState` fields plus the location they belong to). Every write goes to a `.TMP` file first and then replaces the real file; if power is cut between the delete and the rename, the `.TMP` is used at the next load.
+
+Design notes:
+* **Switching location is a data boundary.** Before `setActiveLocation()`, the logger writes the current hour and day records under the OLD location and resets the counters (`commitHourlyRecordToSD`, `rolloverDailyLog`, `resetDLICounter`).
+* **Surviving resets:** `DataManager::exportState(now)` / `importState()` snapshot the running DLI and hour statistics. The logger saves the snapshot every few minutes and, at boot, restores it only if the saved location matches the active one and the stamps match the current day (and hour). If the snapshot is from an earlier day, the daily row for that day was never written, so the logger should write it from the saved values before discarding them.
+* **Clock:** the RTC has no timezone handling. When the logger is lent out to another timezone, set the clock there.
+* **`LOG_INTERVAL_MIN` is stored and validated but not yet honored** by `DLI_Logger.ino`, which still writes hourly.
 
 #### UIManager (The Main State Engine)
 Orchestrates UX transitions mapped to your specified workflow using a strict finite state configuration.
@@ -442,18 +478,19 @@ void loop() {
         float timeDeltaSeconds = (currentMillis - lastSampleMillis) / 1000.0f;
         lastSampleMillis = currentMillis;
 
-        // Collect register data, compute instant PAR
-        dataMgr.captureInstantaneousSpectrum();
-        
-        // Accumulate photon counts mathematically into total DLI values
-        dataMgr.processDLIIntegration(timeDeltaSeconds);
+        // Collect register data, compute instant PAR; integrate only on success
+        if (dataMgr.captureInstantaneousSpectrum()) {
+            // Accumulate photon counts mathematically into total DLI values
+            dataMgr.processDLIIntegration(timeDeltaSeconds);
+        }
 
-        // Track calendar rollover conditions
+        // Track calendar rollover conditions (at midnight both fire; hour first)
         if (timeMgr.hasHourRolledOver()) {
             dataMgr.commitHourlyRecordToSD("LIVING_RM", timeMgr.getCurrentTime());
         }
         if (timeMgr.hasDayRolledOver()) {
-            dataMgr.rolloverDailyLog("LIVING_RM", timeMgr.getCurrentTime());
+            // The day being closed is yesterday
+            dataMgr.rolloverDailyLog("LIVING_RM", timeMgr.getCurrentTime() - TimeSpan(1, 0, 0, 0));
             dataMgr.resetDLICounter();
         }
     }
@@ -475,7 +512,7 @@ To prevent stability issues on the ATmega2560 framework, ensure the following en
 
 ## 8. Spectrometer Subsystem
 
-**Sketch:** [`Spectrometer/Spectrometer.ino`](../Spectrometer/Spectrometer.ino)
+**Sketch:** [`stand-alone-scripts/Spectrometer/Spectrometer.ino`](../stand-alone-scripts/Spectrometer/Spectrometer.ino)
 
 This is a standalone validation and calibration tool — it is not part of the main DLI logger sketch. Its job is to let you point the sensor at any light source, immediately see its spectral fingerprint as a colour bar chart on the TFT, and read the light type classification on-screen. It also streams raw channel counts to the Serial Monitor in CSV format so readings can be logged for PAR calibration work.
 
@@ -522,3 +559,27 @@ Each cycle the sketch prints one line to Serial (115200 baud) in the format:
 F1(415),F2(445),F3(480),F4(515),F5(555),F6(590),F7(630),F8(680),gain_x
 ```
 This data was used to build the lux-to-PAR calibration dataset (10 locations, documented in `memory/project_calibration.md`) which provides the per-light-type conversion factors the DLI logger will use.
+
+---
+
+## 9. Implementation Status
+
+Hardware is complete (Fritzing schematic: `docs/Complete Circuit.fzz`). Each component below lives in `lib/` as a header-only library with a stand-alone test sketch in `stand-alone-scripts/`. A sketch needs its own copy of each header it uses (copy from `lib/`); edit `lib/` and re-copy to avoid the copies drifting.
+
+| Component | Library | Test / tool sketch | Status |
+| :--- | :--- | :--- | :--- |
+| `InputManager` | `lib/InputManager.h` | `InputTest` | Done, hardware-tested |
+| `TimeManager` | `lib/TimeManager.h` | `TimeManagerTest` | Done, hardware-tested |
+| `DataManager` | `lib/DataManager.h` | `DataManagerTest` | Done, hardware-tested (incl. 1 Hz sensor + SD soak) |
+| Spectrometer / light classifier | inline in sketch | `Spectrometer` | Done; the bar-chart code is to be extracted into a `LightSignatureView` |
+| PAR calibration (`K_SENSOR`, `CAL.CFG`) | inline in sketch | `Calibration` | Done |
+| TFT, SD and RTC bring-up | — | `TFT_Test`, `SDTest`, `clock_test` | Done |
+| `SettingsManager` (locations, active location, logging interval, running-DLI snapshot) | `lib/SettingsManager.h` | `SettingsManagerTest` | Written, awaiting hardware test. Not yet wired into `DLI_Logger.ino` |
+| `UIManager` and screens | — | — | **Not started** — `MAIN_DISPLAY`, `LIGHT_SIGNATURE`, `SETTINGS_MENU`, `MANAGE_LOCATIONS`, `DATA_ENTRY_KB` |
+| `DLI_Logger.ino` orchestrator | uses the three managers | `DLI_Logger/` | **Headless version written, awaiting overnight hardware test.** Samples at 1 Hz, writes hourly / daily CSVs, status over Serial, recovers from missing hardware. No display yet. |
+
+Planned order: run the headless logger overnight and verify the hourly rows and the midnight daily row; then build `UIManager` (`MAIN_DISPLAY`, then `LIGHT_SIGNATURE`), add settings persistence, and add the menu screens one at a time.
+
+Integration notes for the orchestrator:
+* `captureInstantaneousSpectrum()` blocks for ~278 ms (up to ~1.1 s with auto-gain stepping). Poll `InputManager` between reads; it latches button presses, but joystick auto-repeat will stutter during a read.
+* SD and TFT share the SPI bus: drive both chip-selects HIGH at the very top of `setup()`, before any SPI traffic.

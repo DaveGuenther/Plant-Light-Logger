@@ -74,6 +74,7 @@ static void printReading() {
     Serial.print(F(" DLI=")); Serial.print(dataMgr.getCalculatedDLI(), 5);
     Serial.print(F(" ")); Serial.print(dataMgr.getLightName());
     if (dataMgr.isSaturated()) Serial.print(F(" SATURATED"));
+    if (dataMgr.isDark())      Serial.print(F(" DARK"));
     Serial.println();
 }
 

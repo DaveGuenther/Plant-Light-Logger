@@ -60,6 +60,21 @@ static const char* const LIGHT_NAMES[8] = {
     "Halogen",  "Fluorescent",  "HPS/HID",  "Unknown"
 };
 
+// Running totals that would be lost on a reset.  Saved periodically by the
+// logger (via SettingsManager::saveState) and restored at boot when the
+// stamps show it is still the same hour / day.  Stamps are unixtime/3600 and
+// unixtime/86400, the same units TimeManager uses for rollover detection.
+struct DliState {
+    uint32_t dayStamp    = 0;
+    uint32_t hourStamp   = 0;
+    float    dli         = 0.f;     // mol m-2 since the day began
+    float    dayParPeak  = 0.f;
+    uint32_t daySamples  = 0;
+    float    hourParSum  = 0.f;
+    float    hourParMax  = 0.f;
+    uint16_t hourSamples = 0;
+};
+
 class DataManager {
 public:
     static const uint8_t SD_CS_PIN = 4;
@@ -118,16 +133,23 @@ public:
         }
         readGain   = usedGain;
         saturated  = (peak >= 65000);
-        lightType  = classifyLight(ch, usedGain);
+
+        // Gain-normalised peak: counts per unit gain.  Below DARK_NORM_PEAK
+        // (~770 counts at 512x) the signal is at the noise floor / leakage
+        // level, where the classifier is meaningless (a covered sensor reads
+        // as "Halogen" because red and near-IR leak through the cover).
+        float gainFactor = GAIN_VALUES[(int)usedGain];
+        dark      = ((float)peak / gainFactor) < DARK_NORM_PEAK;
+        lightType = dark ? LT_UNKNOWN : classifyLight(ch, usedGain);
 
         currentPAR = 0.f;
-        if (calOk) {
-            float gainFactor = GAIN_VALUES[(int)usedGain];
+        if (calOk && !dark) {
             float normSum = 0.f;
             for (uint8_t i = 0; i < 8; i++) {
                 normSum += (float)ch[i] / gainFactor * CH_BW[i];
             }
             currentPAR = kSensor * normSum;
+            if (currentPAR < PAR_FLOOR) currentPAR = 0.f;
         }
         lastCaptureOk = true;
         return true;
@@ -211,6 +233,34 @@ public:
         daySamples = 0;
     }
 
+    // ---- Persistence of running totals ------------------------------------
+
+    // Snapshot of the totals, stamped with `now` so a later boot can tell
+    // whether they still belong to the current hour / day.
+    DliState exportState(const DateTime& now) const {
+        DliState s;
+        s.dayStamp    = now.unixtime() / 86400UL;
+        s.hourStamp   = now.unixtime() / 3600UL;
+        s.dli         = dli;
+        s.dayParPeak  = dayParPeak;
+        s.daySamples  = daySamples;
+        s.hourParSum  = hourParSum;
+        s.hourParMax  = hourParMax;
+        s.hourSamples = hourSamples;
+        return s;
+    }
+
+    // Overwrites the totals.  The caller decides whether the state is still
+    // valid (same location, same day / hour) BEFORE importing.
+    void importState(const DliState& s) {
+        dli         = s.dli;
+        dayParPeak  = s.dayParPeak;
+        daySamples  = s.daySamples;
+        hourParSum  = s.hourParSum;
+        hourParMax  = s.hourParMax;
+        hourSamples = s.hourSamples;
+    }
+
     // ---- Accessors --------------------------------------------------------
 
     const uint16_t* getRawSpectrum() const { return rawSpectrum; }
@@ -220,6 +270,7 @@ public:
     const char* getLightName()    const { return LIGHT_NAMES[(int)lightType]; }
     float     getGainFactor()     const { return GAIN_VALUES[(int)readGain]; }
     bool      isSaturated()       const { return saturated; }
+    bool      isDark()            const { return dark; }   // below noise floor: type Unknown, PAR 0
     uint16_t  getHourSamples()    const { return hourSamples; }
 
     // Diagnostics for the soak test.
@@ -242,6 +293,7 @@ private:
     uint16_t  rawSpectrum[8] = {0};
     LightType lightType  = LT_UNKNOWN;
     bool      saturated  = false;
+    bool      dark       = false;
     bool      lastCaptureOk = false;
     float     currentPAR = 0.f;
 
@@ -255,6 +307,15 @@ private:
 
     uint32_t readFailures  = 0;
     uint32_t writeFailures = 0;
+
+    // Low-signal thresholds, from covered-sensor readings.  Light leaking
+    // through a cover varies with the cover: peaks of ~170 to ~480 counts at
+    // 512x (norm 0.33-0.94, PAR 0.06-0.30) were seen.  Genuinely dim indoor
+    // light is well above that (peak 1661 at 512x = norm 3.2, PAR 1.4).  The
+    // thresholds sit between the two; light below the PAR floor adds
+    // essentially nothing to DLI (12 h at 0.5 = 0.02 mol/m2).
+    static constexpr float DARK_NORM_PEAK = 1.5f;   // counts / gain (~770 at 512x)
+    static constexpr float PAR_FLOOR      = 0.5f;   // umol m-2 s-1
 
     // Index matches as7341_gain_t (0 = 0.5x ... 10 = 512x).
     static constexpr float GAIN_VALUES[11] = {
@@ -343,5 +404,7 @@ private:
     }
 };
 
+constexpr float DataManager::DARK_NORM_PEAK;
+constexpr float DataManager::PAR_FLOOR;
 constexpr float DataManager::GAIN_VALUES[11];
 constexpr float DataManager::CH_BW[8];
